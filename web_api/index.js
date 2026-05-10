@@ -11,6 +11,8 @@ const ai = new AiService();
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
+app.use(express.text({ type: "*/*", limit: "2mb" }));
 
 const PORT = process.env.PORT || 3000;
 const BACKEND_CLIENT_KEY = process.env.BACKEND_CLIENT_KEY || "";
@@ -34,6 +36,58 @@ function requireClientKey(req, res, next) {
   next();
 }
 
+function pickMessage(body) {
+  if (!body) return "";
+
+  if (typeof body === "string") return body.trim();
+
+  if (typeof body.message === "string" && body.message.trim()) return body.message.trim();
+  if (typeof body.prompt === "string" && body.prompt.trim()) return body.prompt.trim();
+  if (typeof body.content === "string" && body.content.trim()) return body.content.trim();
+  if (typeof body.input === "string" && body.input.trim()) return body.input.trim();
+  if (typeof body.text === "string" && body.text.trim()) return body.text.trim();
+  if (typeof body.query === "string" && body.query.trim()) return body.query.trim();
+
+  if (Array.isArray(body.messages) && body.messages.length) {
+    const last = body.messages[body.messages.length - 1];
+
+    if (typeof last === "string" && last.trim()) return last.trim();
+    if (last && typeof last.content === "string" && last.content.trim()) return last.content.trim();
+    if (last && Array.isArray(last.content)) {
+      const textPart = last.content.find((p) => typeof p?.text === "string" && p.text.trim());
+      if (textPart) return textPart.text.trim();
+    }
+  }
+
+  if (body.data && typeof body.data === "object") {
+    return pickMessage(body.data);
+  }
+
+  return "";
+}
+
+function pickConversationId(body) {
+  if (!body || typeof body === "string") return "default";
+  return (
+    body.conversationId ||
+    body.chatId ||
+    body.conversation_id ||
+    body.threadId ||
+    body.sessionId ||
+    "default"
+  );
+}
+
+function pickUserId(body) {
+  if (!body || typeof body === "string") return "web-user";
+  return body.userId || body.user_id || body.memberId || "web-user";
+}
+
+function pickCustomSystemPrompt(body) {
+  if (!body || typeof body === "string") return "";
+  return body.customSystemPrompt || body.systemPrompt || "";
+}
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -53,23 +107,25 @@ app.get("/health", (req, res) => {
 app.post("/api/chat", requireClientKey, async (req, res) => {
   try {
     const body = req.body || {};
+    const rawMessage = pickMessage(body);
+    const conversationId = pickConversationId(body);
+    const userId = pickUserId(body);
+    const customSystemPrompt = pickCustomSystemPrompt(body);
 
-    const rawMessage = body.message ?? body.prompt ?? body.content ?? "";
-    const conversationId = body.conversationId || body.chatId || body.conversation_id || "default";
-    const userId = body.userId || body.user_id || "web-user";
-    const customSystemPrompt = body.customSystemPrompt || "";
+    console.log("Body recebido:", typeof body === "string" ? body : JSON.stringify(body));
 
-    if (!rawMessage || typeof rawMessage !== "string" || !rawMessage.trim()) {
+    if (!rawMessage) {
       return res.status(400).json({
         ok: false,
-        error: "Mensagem inválida."
+        error: "Mensagem inválida.",
+        receivedType: typeof body
       });
     }
 
     const reply = await ai.askWeb(
       conversationId,
       userId,
-      rawMessage.trim(),
+      rawMessage,
       customSystemPrompt
     );
 
