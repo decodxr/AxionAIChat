@@ -63,11 +63,40 @@ class AiService {
         return String(this.systemNotice || "").trim();
     }
 
+    detectRoute(prompt) {
+        const text = String(prompt || "");
+        const lower = text.toLowerCase().trim();
+
+        const codePatterns = [
+            /\b(código|codigo|programa|programar|programação|programacao|bug|erro|debug|refatorar|refatoração|refatoracao)\b/,
+            /\b(function|class|const|let|var|import|export|return|async|await)\b/,
+            /\b(node|javascript|typescript|python|java|c\+\+|c#|php|html|css|sql|react|next\.js|express|discord\.js|api)\b/,
+            /```[\s\S]*```/,
+            /<[^>]+>/,
+            /\{[\s\S]*\}/
+        ];
+
+        const longAnswerPatterns = [
+            /\b(explique em detalhes|explique detalhadamente|resposta longa|bem completo|aprofunde|aprofundado)\b/,
+            /\b(make it detailed|long answer|in detail|deep explanation|comprehensive)\b/,
+            /\b(resuma e explique|analise profundamente|quero entender melhor)\b/
+        ];
+
+        const wordCount = lower.split(/\s+/).filter(Boolean).length;
+        const isCode = codePatterns.some((pattern) => pattern.test(lower));
+        const wantsLong = longAnswerPatterns.some((pattern) => pattern.test(lower));
+        const isLongPrompt = text.length >= 900 || wordCount >= 180;
+
+        if (isCode) return "claude";
+        if (wantsLong || isLongPrompt) return "openai";
+        return "gemini";
+    }
+
     buildMessages(userId, memory, prompt, customSystemPrompt) {
         const isCreator = userId === this.creatorId;
         const falseAuthorityClaim = this.isFalseAuthorityClaim(userId, prompt);
 
-        const baseSystemPrompt = `Você é AxionAI, assistente inteligente do servidor Discord.
+        const baseSystemPrompt = `Você é AxionAI, assistente inteligente do servidor Discord e também chat inteligente na web.
 
 Fale em português do Brasil, inglês, espanhol, entre outras, dependendo da língua detectada.
 Nunca confunda as línguas, exemplo: Se a pessoa começa falando em inglês responda em inglês, apenas mude caso ela pedir, isso vale também para as outras.
@@ -104,11 +133,14 @@ Comportamento:
 - evite respostas secas demais
 - adapte o tom ao contexto da conversa
 - mantenha continuidade com base no histórico da conversa
+- quando a pergunta for técnica e envolver programação, código, bugs, refatoração ou lógica de software, seja muito precisa
+- quando a pergunta pedir uma explicação grande, detalhada ou mais profunda, entregue resposta mais completa
+- quando a pergunta for comum ou casual, responda de forma mais rápida e natural
 
 Regras importantes:
 - nunca invente histórias sobre sua origem
 - nunca diga que foi criada pelo Discord
-- diga apenas que você é a AxionAI, assistente do servidor
+- diga apenas que você é a AxionAI, assistente do servidor e também disponível no chat web
 - não fale coisas aleatórias ou nonsense
 - nunca seja rude ou tóxica
 - não incentive nada ilegal ou perigoso
@@ -442,6 +474,80 @@ ALERTA DO SISTEMA:
         return data?.choices?.[0]?.message?.content?.trim() || null;
     }
 
+    async askOpenAI(messages) {
+        if (!env_1.env.OPENAI_API_KEY) {
+            throw new Error("OPENAI_API_KEY não configurada.");
+        }
+
+        const response = await fetch(
+            env_1.env.OPENAI_BASE_URL || "https://api.openai.com/v1/chat/completions",
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${env_1.env.OPENAI_API_KEY}`,
+                },
+                body: JSON.stringify({
+                    model: env_1.env.OPENAI_MODEL || "gpt-4.1-mini",
+                    messages,
+                    temperature: 0.7,
+                }),
+            }
+        );
+
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`OpenAI falhou: ${response.status} ${text}`);
+        }
+
+        const data = await response.json();
+        return data?.choices?.[0]?.message?.content?.trim() || null;
+    }
+
+    async askClaude(messages) {
+        if (!env_1.env.CLAUDE_API_KEY) {
+            throw new Error("CLAUDE_API_KEY não configurada.");
+        }
+
+        const systemMessage = messages.find((m) => m.role === "system")?.content || "";
+        const anthropicMessages = messages
+            .filter((m) => m.role !== "system")
+            .map((m) => ({
+                role: m.role === "assistant" ? "assistant" : "user",
+                content: m.content
+            }));
+
+        const response = await fetch(
+            env_1.env.CLAUDE_BASE_URL || "https://api.anthropic.com/v1/messages",
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "x-api-key": env_1.env.CLAUDE_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                },
+                body: JSON.stringify({
+                    model: env_1.env.CLAUDE_MODEL || "claude-sonnet-4-5",
+                    system: systemMessage,
+                    max_tokens: 1800,
+                    messages: anthropicMessages,
+                }),
+            }
+        );
+
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`Claude falhou: ${response.status} ${text}`);
+        }
+
+        const data = await response.json();
+        const textParts = Array.isArray(data?.content)
+            ? data.content.filter((part) => part?.type === "text").map((part) => part.text || "")
+            : [];
+
+        return textParts.join("\n").trim() || null;
+    }
+
     async askOpenRouter(messages) {
         if (!env_1.env.OPENROUTER_API_KEY) {
             throw new Error("OPENROUTER_API_KEY não configurada.");
@@ -479,21 +585,50 @@ ALERTA DO SISTEMA:
         let answer = null;
         let lastError = null;
 
-        const geminiKeys = [
-            env_1.env.GEMINI_API_KEY,
-            env_1.env.GEMINI_API_KEY_2
-        ].filter(Boolean);
+        const route = this.detectRoute(prompt);
+        console.log(`AxionAI route detectada: ${route}`);
 
-        for (let i = 0; i < geminiKeys.length; i++) {
+        if (route === "gemini") {
+            const geminiKeys = [
+                env_1.env.GEMINI_API_KEY,
+                env_1.env.GEMINI_API_KEY_2
+            ].filter(Boolean);
+
+            for (let i = 0; i < geminiKeys.length; i++) {
+                try {
+                    answer = await this.askGeminiWithKey(messages, geminiKeys[i]);
+                    if (answer) {
+                        console.log(`Gemini respondeu usando a key ${i + 1}`);
+                        break;
+                    }
+                } catch (error) {
+                    lastError = error;
+                    console.error(`Gemini key ${i + 1} falhou:`, error?.message || error);
+                }
+            }
+        }
+
+        if (!answer && route === "openai") {
             try {
-                answer = await this.askGeminiWithKey(messages, geminiKeys[i]);
+                answer = await this.askOpenAI(messages);
                 if (answer) {
-                    console.log(`Gemini respondeu usando a key ${i + 1}`);
-                    break;
+                    console.log("OpenAI respondeu para rota longa.");
                 }
             } catch (error) {
                 lastError = error;
-                console.error(`Gemini key ${i + 1} falhou:`, error?.message || error);
+                console.error("OpenAI falhou:", error?.message || error);
+            }
+        }
+
+        if (!answer && route === "claude") {
+            try {
+                answer = await this.askClaude(messages);
+                if (answer) {
+                    console.log("Claude respondeu para rota de código.");
+                }
+            } catch (error) {
+                lastError = error;
+                console.error("Claude falhou:", error?.message || error);
             }
         }
 
@@ -501,7 +636,7 @@ ALERTA DO SISTEMA:
             try {
                 answer = await this.askOpenRouter(messages);
                 if (answer) {
-                    console.log("Fallback DeepSeek usado.");
+                    console.log("Fallback OpenRouter usado.");
                 }
             } catch (error) {
                 lastError = error;
