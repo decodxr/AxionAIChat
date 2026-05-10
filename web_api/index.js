@@ -52,9 +52,14 @@ app.get("/health", (req, res) => {
 
 app.post("/api/chat", requireClientKey, async (req, res) => {
   try {
-    const { message, conversationId, userId, customSystemPrompt } = req.body || {};
+    const body = req.body || {};
 
-    if (!message || typeof message !== "string" || !message.trim()) {
+    const rawMessage = body.message ?? body.prompt ?? body.content ?? "";
+    const conversationId = body.conversationId || body.chatId || body.conversation_id || "default";
+    const userId = body.userId || body.user_id || "web-user";
+    const customSystemPrompt = body.customSystemPrompt || "";
+
+    if (!rawMessage || typeof rawMessage !== "string" || !rawMessage.trim()) {
       return res.status(400).json({
         ok: false,
         error: "Mensagem inválida."
@@ -62,16 +67,16 @@ app.post("/api/chat", requireClientKey, async (req, res) => {
     }
 
     const reply = await ai.askWeb(
-      conversationId || "default",
-      userId || "web-user",
-      message.trim(),
-      customSystemPrompt || ""
+      conversationId,
+      userId,
+      rawMessage.trim(),
+      customSystemPrompt
     );
 
     return res.json({
       ok: true,
       reply,
-      conversationId: conversationId || "default"
+      conversationId
     });
   } catch (error) {
     console.error("Erro no /api/chat:", error);
